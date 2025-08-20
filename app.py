@@ -21,6 +21,7 @@ active_downloads = {}
 class ChatDownloadManager:
     def __init__(self):
         self.downloads = {}
+        self.stop_flags = {}  # Control flags to stop downloads
     
     def start_download(self, url, output_format='jsonl', max_messages=None, timeout=None):
         download_id = f"download_{int(time.time())}"
@@ -30,6 +31,9 @@ class ChatDownloadManager:
         filename = f"{download_id}.{output_format}"
         filepath = os.path.join(temp_dir, filename)
         
+        # Initialize stop flag
+        self.stop_flags[download_id] = False
+        
         # Store download info
         self.downloads[download_id] = {
             'url': url,
@@ -37,7 +41,8 @@ class ChatDownloadManager:
             'status': 'starting',
             'messages_count': 0,
             'start_time': datetime.now().isoformat(),
-            'format': output_format
+            'format': output_format,
+            'can_stop': True
         }
         
         # Start download in background thread
@@ -65,6 +70,13 @@ class ChatDownloadManager:
             
             message_count = 0
             for message in chat:
+                # Check if stop was requested
+                if self.stop_flags.get(download_id, False):
+                    self.downloads[download_id]['status'] = 'stopped'
+                    self.downloads[download_id]['end_time'] = datetime.now().isoformat()
+                    self.downloads[download_id]['can_stop'] = False
+                    break
+                
                 message_count += 1
                 self.downloads[download_id]['messages_count'] = message_count
                 
@@ -72,12 +84,25 @@ class ChatDownloadManager:
                 if message_count % 10 == 0:
                     self.downloads[download_id]['last_update'] = datetime.now().isoformat()
             
-            self.downloads[download_id]['status'] = 'completed'
-            self.downloads[download_id]['end_time'] = datetime.now().isoformat()
+            # Only mark as completed if not stopped
+            if not self.stop_flags.get(download_id, False):
+                self.downloads[download_id]['status'] = 'completed'
+                self.downloads[download_id]['end_time'] = datetime.now().isoformat()
+            
+            self.downloads[download_id]['can_stop'] = False
             
         except Exception as e:
             self.downloads[download_id]['status'] = 'error'
             self.downloads[download_id]['error'] = str(e)
+            self.downloads[download_id]['can_stop'] = False
+    
+    def stop_download(self, download_id):
+        """Stop a download and mark it as stopped"""
+        if download_id in self.downloads:
+            if self.downloads[download_id]['status'] in ['starting', 'downloading']:
+                self.stop_flags[download_id] = True
+                return True
+        return False
     
     def get_status(self, download_id):
         return self.downloads.get(download_id, {'status': 'not_found'})
@@ -174,6 +199,23 @@ def get_status(download_id):
     status = download_manager.get_status(download_id)
     return jsonify(status)
 
+@app.route('/stop/<download_id>', methods=['POST'])
+def stop_download(download_id):
+    try:
+        success = download_manager.stop_download(download_id)
+        
+        if success:
+            return jsonify({
+                'message': 'Download stopped successfully',
+                'download_id': download_id,
+                'status': 'stopping'
+            })
+        else:
+            return jsonify({'error': 'Download not found or cannot be stopped'}), 404
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/download/<download_id>')
 def download_file(download_id):
     try:
@@ -183,13 +225,20 @@ def download_file(download_id):
             return jsonify({'error': 'File not found'}), 404
         
         status = download_manager.get_status(download_id)
-        if status['status'] != 'completed':
-            return jsonify({'error': 'Download not completed yet'}), 400
+        # Allow download for completed OR stopped downloads
+        if status['status'] not in ['completed', 'stopped']:
+            return jsonify({'error': 'Download not ready yet. Status: ' + status['status']}), 400
+        
+        # Check if file has content
+        if os.path.getsize(filepath) == 0:
+            return jsonify({'error': 'No messages captured yet'}), 400
+        
+        filename_suffix = "_partial" if status['status'] == 'stopped' else ""
         
         return send_file(
             filepath,
             as_attachment=True,
-            download_name=f"chat_{download_id}.{status['format']}"
+            download_name=f"chat_{download_id}{filename_suffix}.{status['format']}"
         )
         
     except Exception as e:

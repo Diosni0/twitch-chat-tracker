@@ -102,6 +102,19 @@
             transform: none;
         }
         
+        .btn-stop {
+            background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
+            margin-top: 10px;
+        }
+        
+        .btn-stop:hover {
+            background: linear-gradient(135deg, #c82333 0%, #bd2130 100%);
+        }
+        
+        .status-stopped {
+            border-left-color: #fd7e14;
+        }
+        
         .status-section {
             padding: 0 40px 40px;
         }
@@ -237,6 +250,10 @@
                 <button type="submit" class="btn" id="startBtn">
                     🚀 Iniciar Captura
                 </button>
+                
+                <button type="button" class="btn btn-stop" id="stopBtn" style="display: none;">
+                    ⏹️ Parar Captura
+                </button>
             </form>
         </div>
         
@@ -291,21 +308,62 @@
                 if (response.ok) {
                     currentDownloadId = result.download_id;
                     showStatus();
+                    showStopButton();
                     startStatusPolling();
                 } else {
                     alert('Error: ' + result.error);
-                    resetButton();
+                    resetButtons();
                 }
                 
             } catch (error) {
                 alert('Error de conexión: ' + error.message);
-                resetButton();
+                resetButtons();
             }
         });
 
-        function resetButton() {
+        // Stop button functionality
+        document.getElementById('stopBtn').addEventListener('click', async () => {
+            if (!currentDownloadId) return;
+            
+            try {
+                document.getElementById('stopBtn').disabled = true;
+                document.getElementById('stopBtn').textContent = '⏳ Parando...';
+                
+                const response = await fetch(`/stop/${currentDownloadId}`, {
+                    method: 'POST'
+                });
+                
+                const result = await response.json();
+                
+                if (response.ok) {
+                    // Status polling will handle the UI update
+                } else {
+                    alert('Error al parar: ' + result.error);
+                    document.getElementById('stopBtn').disabled = false;
+                    document.getElementById('stopBtn').textContent = '⏹️ Parar Captura';
+                }
+                
+            } catch (error) {
+                alert('Error de conexión: ' + error.message);
+                document.getElementById('stopBtn').disabled = false;
+                document.getElementById('stopBtn').textContent = '⏹️ Parar Captura';
+            }
+        });
+
+        function resetButtons() {
             document.getElementById('startBtn').disabled = false;
             document.getElementById('startBtn').textContent = '🚀 Iniciar Captura';
+            hideStopButton();
+        }
+
+        function showStopButton() {
+            document.getElementById('stopBtn').style.display = 'block';
+            document.getElementById('stopBtn').disabled = false;
+            document.getElementById('stopBtn').textContent = '⏹️ Parar Captura';
+        }
+
+        function hideStopButton() {
+            document.getElementById('stopBtn').style.display = 'none';
         }
 
         function showStatus() {
@@ -324,9 +382,9 @@
                     
                     updateStatusDisplay(status);
                     
-                    if (status.status === 'completed' || status.status === 'error') {
+                    if (status.status === 'completed' || status.status === 'error' || status.status === 'stopped') {
                         clearInterval(statusInterval);
-                        resetButton();
+                        resetButtons();
                     }
                     
                 } catch (error) {
@@ -365,6 +423,15 @@
                         📥 Descargar archivo
                     </a>
                 `;
+            } else if (status.status === 'stopped') {
+                content += `
+                    <div style="color: #fd7e14; margin: 10px 0;">
+                        ⏹️ Captura detenida por el usuario
+                    </div>
+                    <a href="/download/${currentDownloadId}" class="download-btn">
+                        📥 Descargar archivo parcial
+                    </a>
+                `;
             } else if (status.status === 'error') {
                 content += `
                     <div style="color: #dc3545; margin: 10px 0;">
@@ -381,6 +448,7 @@
                 'starting': '🔄 Iniciando...',
                 'downloading': '📥 Descargando...',
                 'completed': '✅ Completado',
+                'stopped': '⏹️ Detenido',
                 'error': '❌ Error'
             };
             return statusTexts[status] || status;
