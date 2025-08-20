@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, render_template
 import os
 import json
 import threading
@@ -8,6 +8,12 @@ from chat_downloader import ChatDownloader
 import tempfile
 
 app = Flask(__name__)
+
+# Configuration from environment variables
+MAX_CONCURRENT_DOWNLOADS = int(os.environ.get('MAX_CONCURRENT_DOWNLOADS', 10))
+DEFAULT_TIMEOUT = int(os.environ.get('DEFAULT_TIMEOUT', 7200))  # 2 hours
+MAX_MESSAGES_LIMIT = int(os.environ.get('MAX_MESSAGES_LIMIT', 50000))
+LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO')
 
 # Store active downloads
 active_downloads = {}
@@ -86,6 +92,10 @@ download_manager = ChatDownloadManager()
 
 @app.route('/')
 def home():
+    return render_template('index.html')
+
+@app.route('/api')
+def api_info():
     return jsonify({
         'service': 'Chat Downloader API',
         'version': '1.0.0',
@@ -93,7 +103,8 @@ def home():
             'POST /download': 'Start chat download',
             'GET /status/<download_id>': 'Check download status',
             'GET /download/<download_id>': 'Download file',
-            'GET /health': 'Health check'
+            'GET /health': 'Health check',
+            'GET /active': 'List active downloads'
         }
     })
 
@@ -109,14 +120,31 @@ def start_download():
         if not data or 'url' not in data:
             return jsonify({'error': 'URL is required'}), 400
         
+        # Check concurrent downloads limit
+        active_count = len([d for d in download_manager.downloads.values() 
+                           if d['status'] in ['starting', 'downloading']])
+        if active_count >= MAX_CONCURRENT_DOWNLOADS:
+            return jsonify({'error': f'Maximum concurrent downloads ({MAX_CONCURRENT_DOWNLOADS}) reached'}), 429
+        
         url = data['url']
         output_format = data.get('format', 'jsonl')
         max_messages = data.get('max_messages')
-        timeout = data.get('timeout')
+        timeout = data.get('timeout', DEFAULT_TIMEOUT)
         
         # Validate format
         if output_format not in ['json', 'jsonl', 'csv', 'txt']:
             return jsonify({'error': 'Invalid format. Use: json, jsonl, csv, txt'}), 400
+        
+        # Validate URL
+        if not any(platform in url.lower() for platform in ['twitch.tv', 'youtube.com', 'facebook.com', 'zoom.us']):
+            return jsonify({'error': 'Unsupported platform. Use Twitch, YouTube, Facebook, or Zoom URLs'}), 400
+        
+        # Apply limits
+        if max_messages and max_messages > MAX_MESSAGES_LIMIT:
+            max_messages = MAX_MESSAGES_LIMIT
+        
+        if timeout > DEFAULT_TIMEOUT:
+            timeout = DEFAULT_TIMEOUT
         
         # Start download
         download_id = download_manager.start_download(
@@ -129,7 +157,13 @@ def start_download():
         return jsonify({
             'download_id': download_id,
             'status': 'started',
-            'message': 'Download started successfully'
+            'message': 'Download started successfully',
+            'config': {
+                'url': url,
+                'format': output_format,
+                'max_messages': max_messages,
+                'timeout': timeout
+            }
         })
         
     except Exception as e:
