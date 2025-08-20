@@ -39,7 +39,7 @@ class ChatDownloadManager:
             if 'videos/' in url:  # VOD
                 inactivity_timeout = 60  # 1 minute for VODs
             else:  # Live stream
-                inactivity_timeout = 300  # 5 minutes for live streams
+                inactivity_timeout = 2400  # 40 minutes for live streams
         
         # Store download info
         self.downloads[download_id] = {
@@ -105,9 +105,10 @@ class ChatDownloadManager:
                 current_time = time.time()
                 time_since_last_message = current_time - last_message_time
                 
-                if time_since_last_message >= 290:  # Close to inactivity timeout
+                if time_since_last_message >= (inactivity_timeout - 10):  # Close to inactivity timeout
                     self.downloads[download_id]['status'] = 'stream_ended'
-                    self.downloads[download_id]['end_reason'] = 'Stream ended (no activity for 5 minutes)'
+                    timeout_minutes = inactivity_timeout // 60
+                    self.downloads[download_id]['end_reason'] = f'Stream ended (no activity for {timeout_minutes} minutes)'
                 else:
                     self.downloads[download_id]['status'] = 'completed'
                     self.downloads[download_id]['end_reason'] = 'Reached maximum messages or timeout'
