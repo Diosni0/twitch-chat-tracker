@@ -23,7 +23,7 @@ class ChatDownloadManager:
         self.downloads = {}
         self.stop_flags = {}  # Control flags to stop downloads
     
-    def start_download(self, url, output_format='jsonl', max_messages=None, timeout=None):
+    def start_download(self, url, output_format='jsonl', max_messages=None, timeout=None, inactivity_timeout=None):
         download_id = f"download_{int(time.time())}"
         
         # Create temp file
@@ -34,6 +34,13 @@ class ChatDownloadManager:
         # Initialize stop flag
         self.stop_flags[download_id] = False
         
+        # Set default inactivity timeout based on URL type
+        if inactivity_timeout is None:
+            if 'videos/' in url:  # VOD
+                inactivity_timeout = 60  # 1 minute for VODs
+            else:  # Live stream
+                inactivity_timeout = 300  # 5 minutes for live streams
+        
         # Store download info
         self.downloads[download_id] = {
             'url': url,
@@ -42,20 +49,23 @@ class ChatDownloadManager:
             'messages_count': 0,
             'start_time': datetime.now().isoformat(),
             'format': output_format,
-            'can_stop': True
+            'can_stop': True,
+            'inactivity_timeout': inactivity_timeout,
+            'last_message_time': None,
+            'is_live': 'videos/' not in url  # Detect if it's a live stream
         }
         
         # Start download in background thread
         thread = threading.Thread(
             target=self._download_chat,
-            args=(download_id, url, filepath, output_format, max_messages, timeout)
+            args=(download_id, url, filepath, output_format, max_messages, timeout, inactivity_timeout)
         )
         thread.daemon = True
         thread.start()
         
         return download_id
     
-    def _download_chat(self, download_id, url, filepath, output_format, max_messages, timeout):
+    def _download_chat(self, download_id, url, filepath, output_format, max_messages, timeout, inactivity_timeout):
         try:
             self.downloads[download_id]['status'] = 'downloading'
             
@@ -65,10 +75,13 @@ class ChatDownloadManager:
                 output=filepath,
                 max_messages=max_messages,
                 timeout=timeout,
-                overwrite=True
+                overwrite=True,
+                inactivity_timeout=inactivity_timeout
             )
             
             message_count = 0
+            last_message_time = time.time()
+            
             for message in chat:
                 # Check if stop was requested
                 if self.stop_flags.get(download_id, False):
@@ -78,15 +91,27 @@ class ChatDownloadManager:
                     break
                 
                 message_count += 1
+                last_message_time = time.time()
                 self.downloads[download_id]['messages_count'] = message_count
+                self.downloads[download_id]['last_message_time'] = datetime.now().isoformat()
                 
                 # Update status every 10 messages
                 if message_count % 10 == 0:
                     self.downloads[download_id]['last_update'] = datetime.now().isoformat()
             
-            # Only mark as completed if not stopped
+            # Determine final status
             if not self.stop_flags.get(download_id, False):
-                self.downloads[download_id]['status'] = 'completed'
+                # Check if it ended due to inactivity (stream ended) or natural completion
+                current_time = time.time()
+                time_since_last_message = current_time - last_message_time
+                
+                if time_since_last_message >= 290:  # Close to inactivity timeout
+                    self.downloads[download_id]['status'] = 'stream_ended'
+                    self.downloads[download_id]['end_reason'] = 'Stream ended (no activity for 5 minutes)'
+                else:
+                    self.downloads[download_id]['status'] = 'completed'
+                    self.downloads[download_id]['end_reason'] = 'Reached maximum messages or timeout'
+                
                 self.downloads[download_id]['end_time'] = datetime.now().isoformat()
             
             self.downloads[download_id]['can_stop'] = False
@@ -225,8 +250,8 @@ def download_file(download_id):
             return jsonify({'error': 'File not found'}), 404
         
         status = download_manager.get_status(download_id)
-        # Allow download for completed OR stopped downloads
-        if status['status'] not in ['completed', 'stopped']:
+        # Allow download for completed, stopped, or stream_ended downloads
+        if status['status'] not in ['completed', 'stopped', 'stream_ended']:
             return jsonify({'error': 'Download not ready yet. Status: ' + status['status']}), 400
         
         # Check if file has content

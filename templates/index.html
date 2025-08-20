@@ -115,6 +115,10 @@
             border-left-color: #fd7e14;
         }
         
+        .status-stream_ended {
+            border-left-color: #17a2b8;
+        }
+        
         .status-section {
             padding: 0 40px 40px;
         }
@@ -382,7 +386,7 @@
                     
                     updateStatusDisplay(status);
                     
-                    if (status.status === 'completed' || status.status === 'error' || status.status === 'stopped') {
+                    if (status.status === 'completed' || status.status === 'error' || status.status === 'stopped' || status.status === 'stream_ended') {
                         clearInterval(statusInterval);
                         resetButtons();
                     }
@@ -408,11 +412,30 @@
             `;
             
             if (status.status === 'downloading') {
+                let inactivityInfo = '';
+                if (status.last_message_time) {
+                    const lastMessageTime = new Date(status.last_message_time);
+                    const now = new Date();
+                    const minutesSinceLastMessage = Math.floor((now - lastMessageTime) / 60000);
+                    
+                    if (minutesSinceLastMessage > 2) {
+                        const inactivityTimeout = status.inactivity_timeout || 300;
+                        const timeoutMinutes = Math.floor(inactivityTimeout / 60);
+                        inactivityInfo = `
+                            <div style="color: #ffc107; font-size: 14px; margin: 5px 0;">
+                                ⚠️ Sin mensajes desde hace ${minutesSinceLastMessage} minutos
+                                ${status.is_live ? `(se detendrá automáticamente en ${timeoutMinutes} min de inactividad)` : ''}
+                            </div>
+                        `;
+                    }
+                }
+                
                 content += `
                     <div class="progress-bar">
                         <div class="progress-fill" style="width: 100%;"></div>
                     </div>
                     <small>Capturando mensajes en tiempo real...</small>
+                    ${inactivityInfo}
                 `;
             } else if (status.status === 'completed') {
                 content += `
@@ -432,6 +455,18 @@
                         📥 Descargar archivo parcial
                     </a>
                 `;
+            } else if (status.status === 'stream_ended') {
+                content += `
+                    <div style="color: #17a2b8; margin: 10px 0;">
+                        📺 Stream terminado automáticamente
+                    </div>
+                    <div style="font-size: 14px; color: #6c757d; margin: 5px 0;">
+                        ${status.end_reason || 'El stream ha finalizado'}
+                    </div>
+                    <a href="/download/${currentDownloadId}" class="download-btn">
+                        📥 Descargar chat completo
+                    </a>
+                `;
             } else if (status.status === 'error') {
                 content += `
                     <div style="color: #dc3545; margin: 10px 0;">
@@ -449,6 +484,7 @@
                 'downloading': '📥 Descargando...',
                 'completed': '✅ Completado',
                 'stopped': '⏹️ Detenido',
+                'stream_ended': '📺 Stream terminado',
                 'error': '❌ Error'
             };
             return statusTexts[status] || status;
