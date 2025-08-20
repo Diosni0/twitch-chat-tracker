@@ -1,0 +1,177 @@
+from flask import Flask, request, jsonify, send_file
+import os
+import json
+import threading
+import time
+from datetime import datetime
+from chat_downloader import ChatDownloader
+import tempfile
+
+app = Flask(__name__)
+
+# Store active downloads
+active_downloads = {}
+
+class ChatDownloadManager:
+    def __init__(self):
+        self.downloads = {}
+    
+    def start_download(self, url, output_format='jsonl', max_messages=None, timeout=None):
+        download_id = f"download_{int(time.time())}"
+        
+        # Create temp file
+        temp_dir = tempfile.gettempdir()
+        filename = f"{download_id}.{output_format}"
+        filepath = os.path.join(temp_dir, filename)
+        
+        # Store download info
+        self.downloads[download_id] = {
+            'url': url,
+            'filepath': filepath,
+            'status': 'starting',
+            'messages_count': 0,
+            'start_time': datetime.now().isoformat(),
+            'format': output_format
+        }
+        
+        # Start download in background thread
+        thread = threading.Thread(
+            target=self._download_chat,
+            args=(download_id, url, filepath, output_format, max_messages, timeout)
+        )
+        thread.daemon = True
+        thread.start()
+        
+        return download_id
+    
+    def _download_chat(self, download_id, url, filepath, output_format, max_messages, timeout):
+        try:
+            self.downloads[download_id]['status'] = 'downloading'
+            
+            downloader = ChatDownloader()
+            chat = downloader.get_chat(
+                url=url,
+                output=filepath,
+                max_messages=max_messages,
+                timeout=timeout,
+                overwrite=True
+            )
+            
+            message_count = 0
+            for message in chat:
+                message_count += 1
+                self.downloads[download_id]['messages_count'] = message_count
+                
+                # Update status every 10 messages
+                if message_count % 10 == 0:
+                    self.downloads[download_id]['last_update'] = datetime.now().isoformat()
+            
+            self.downloads[download_id]['status'] = 'completed'
+            self.downloads[download_id]['end_time'] = datetime.now().isoformat()
+            
+        except Exception as e:
+            self.downloads[download_id]['status'] = 'error'
+            self.downloads[download_id]['error'] = str(e)
+    
+    def get_status(self, download_id):
+        return self.downloads.get(download_id, {'status': 'not_found'})
+    
+    def get_file(self, download_id):
+        if download_id in self.downloads:
+            return self.downloads[download_id].get('filepath')
+        return None
+
+# Global download manager
+download_manager = ChatDownloadManager()
+
+@app.route('/')
+def home():
+    return jsonify({
+        'service': 'Chat Downloader API',
+        'version': '1.0.0',
+        'endpoints': {
+            'POST /download': 'Start chat download',
+            'GET /status/<download_id>': 'Check download status',
+            'GET /download/<download_id>': 'Download file',
+            'GET /health': 'Health check'
+        }
+    })
+
+@app.route('/health')
+def health():
+    return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
+
+@app.route('/download', methods=['POST'])
+def start_download():
+    try:
+        data = request.get_json()
+        
+        if not data or 'url' not in data:
+            return jsonify({'error': 'URL is required'}), 400
+        
+        url = data['url']
+        output_format = data.get('format', 'jsonl')
+        max_messages = data.get('max_messages')
+        timeout = data.get('timeout')
+        
+        # Validate format
+        if output_format not in ['json', 'jsonl', 'csv', 'txt']:
+            return jsonify({'error': 'Invalid format. Use: json, jsonl, csv, txt'}), 400
+        
+        # Start download
+        download_id = download_manager.start_download(
+            url=url,
+            output_format=output_format,
+            max_messages=max_messages,
+            timeout=timeout
+        )
+        
+        return jsonify({
+            'download_id': download_id,
+            'status': 'started',
+            'message': 'Download started successfully'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/status/<download_id>')
+def get_status(download_id):
+    status = download_manager.get_status(download_id)
+    return jsonify(status)
+
+@app.route('/download/<download_id>')
+def download_file(download_id):
+    try:
+        filepath = download_manager.get_file(download_id)
+        
+        if not filepath or not os.path.exists(filepath):
+            return jsonify({'error': 'File not found'}), 404
+        
+        status = download_manager.get_status(download_id)
+        if status['status'] != 'completed':
+            return jsonify({'error': 'Download not completed yet'}), 400
+        
+        return send_file(
+            filepath,
+            as_attachment=True,
+            download_name=f"chat_{download_id}.{status['format']}"
+        )
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/active')
+def list_active():
+    return jsonify({
+        'active_downloads': len(download_manager.downloads),
+        'downloads': {k: {
+            'status': v['status'],
+            'messages_count': v['messages_count'],
+            'start_time': v['start_time']
+        } for k, v in download_manager.downloads.items()}
+    })
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
